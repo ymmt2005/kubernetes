@@ -302,7 +302,8 @@ type predicateMetadata struct {
 
 	// evenPodsSpreadMetadata holds info of the minimum match number on each topology spread constraint,
 	// and the match number of all valid topology pairs.
-	evenPodsSpreadMetadata *evenPodsSpreadMetadata
+	evenPodsSpreadMetadata     *evenPodsSpreadMetadata
+	evenPodsSpreadMetadataSoft *evenPodsSpreadMetadata
 
 	serviceAffinityMetadata  *serviceAffinityMetadata
 	podAffinityMetadata      *podAffinityMetadata
@@ -369,7 +370,12 @@ func (f *MetadataProducerFactory) GetPredicateMetadata(pod *v1.Pod, sharedLister
 
 	// evenPodsSpreadMetadata represents how existing pods match "pod"
 	// on its spread constraints
-	evenPodsSpreadMetadata, err := getEvenPodsSpreadMetadata(pod, allNodes)
+	evenPodsSpreadMetadata, err := getEvenPodsSpreadMetadata(pod, allNodes, false)
+	if err != nil {
+		klog.Errorf("Error calculating spreadConstraintsMap: %v", err)
+		return nil
+	}
+	evenPodsSpreadMetadataSoft, err := getEvenPodsSpreadMetadata(pod, allNodes, true)
 	if err != nil {
 		klog.Errorf("Error calculating spreadConstraintsMap: %v", err)
 		return nil
@@ -382,11 +388,12 @@ func (f *MetadataProducerFactory) GetPredicateMetadata(pod *v1.Pod, sharedLister
 	}
 
 	predicateMetadata := &predicateMetadata{
-		pod:                      pod,
-		evenPodsSpreadMetadata:   evenPodsSpreadMetadata,
-		podAffinityMetadata:      podAffinityMetadata,
-		podFitsResourcesMetadata: getPodFitsResourcesMetedata(pod),
-		podFitsHostPortsMetadata: getPodFitsHostPortsMetadata(pod),
+		pod:                        pod,
+		evenPodsSpreadMetadata:     evenPodsSpreadMetadata,
+		evenPodsSpreadMetadataSoft: evenPodsSpreadMetadataSoft,
+		podAffinityMetadata:        podAffinityMetadata,
+		podFitsResourcesMetadata:   getPodFitsResourcesMetedata(pod),
+		podFitsHostPortsMetadata:   getPodFitsHostPortsMetadata(pod),
 	}
 	for predicateName, precomputeFunc := range predicateMetadataProducers {
 		klog.V(10).Infof("Precompute: %v", predicateName)
@@ -427,10 +434,10 @@ func getPodAffinityMetadata(pod *v1.Pod, allNodes []*schedulernodeinfo.NodeInfo,
 	}, nil
 }
 
-func getEvenPodsSpreadMetadata(pod *v1.Pod, allNodes []*schedulernodeinfo.NodeInfo) (*evenPodsSpreadMetadata, error) {
+func getEvenPodsSpreadMetadata(pod *v1.Pod, allNodes []*schedulernodeinfo.NodeInfo, includeAnyway bool) (*evenPodsSpreadMetadata, error) {
 	// We have feature gating in APIServer to strip the spec
 	// so don't need to re-check feature gate, just check length of constraints.
-	constraints, err := filterHardTopologySpreadConstraints(pod.Spec.TopologySpreadConstraints)
+	constraints, err := filterHardTopologySpreadConstraints(pod.Spec.TopologySpreadConstraints, includeAnyway)
 	if err != nil {
 		return nil, err
 	}
@@ -499,10 +506,10 @@ func getEvenPodsSpreadMetadata(pod *v1.Pod, allNodes []*schedulernodeinfo.NodeIn
 	return &m, nil
 }
 
-func filterHardTopologySpreadConstraints(constraints []v1.TopologySpreadConstraint) ([]topologySpreadConstraint, error) {
+func filterHardTopologySpreadConstraints(constraints []v1.TopologySpreadConstraint, includeAnyway bool) ([]topologySpreadConstraint, error) {
 	var result []topologySpreadConstraint
 	for _, c := range constraints {
-		if c.WhenUnsatisfiable == v1.DoNotSchedule {
+		if c.WhenUnsatisfiable == v1.DoNotSchedule || includeAnyway {
 			selector, err := metav1.LabelSelectorAsSelector(c.LabelSelector)
 			if err != nil {
 				return nil, err
@@ -635,6 +642,7 @@ func (meta *predicateMetadata) RemovePod(deletedPod *v1.Pod, node *v1.Node) erro
 	}
 	meta.podAffinityMetadata.removePod(deletedPod)
 	meta.evenPodsSpreadMetadata.removePod(deletedPod, meta.pod, node)
+	meta.evenPodsSpreadMetadataSoft.removePod(deletedPod, meta.pod, node)
 	meta.serviceAffinityMetadata.removePod(deletedPod, node)
 
 	return nil
@@ -657,6 +665,7 @@ func (meta *predicateMetadata) AddPod(addedPod *v1.Pod, node *v1.Node) error {
 	// Update meta.evenPodsSpreadMetadata if meta.pod has hard spread constraints
 	// and addedPod matches that
 	meta.evenPodsSpreadMetadata.addPod(addedPod, meta.pod, node)
+	meta.evenPodsSpreadMetadataSoft.addPod(addedPod, meta.pod, node)
 
 	meta.serviceAffinityMetadata.addPod(addedPod, meta.pod, node)
 
@@ -673,6 +682,7 @@ func (meta *predicateMetadata) ShallowCopy() Metadata {
 	newPredMeta.podFitsHostPortsMetadata = meta.podFitsHostPortsMetadata.clone()
 	newPredMeta.podAffinityMetadata = meta.podAffinityMetadata.clone()
 	newPredMeta.evenPodsSpreadMetadata = meta.evenPodsSpreadMetadata.clone()
+	newPredMeta.evenPodsSpreadMetadataSoft = meta.evenPodsSpreadMetadataSoft.clone()
 	newPredMeta.serviceAffinityMetadata = meta.serviceAffinityMetadata.clone()
 	newPredMeta.podFitsResourcesMetadata = meta.podFitsResourcesMetadata.clone()
 	return (Metadata)(newPredMeta)

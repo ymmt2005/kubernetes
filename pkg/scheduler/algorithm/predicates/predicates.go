@@ -1643,15 +1643,17 @@ func EvenPodsSpreadPredicate(pod *v1.Pod, meta Metadata, nodeInfo *schedulernode
 		return false, nil, fmt.Errorf("node not found")
 	}
 
-	var epsMeta *evenPodsSpreadMetadata
-	if predicateMeta, ok := meta.(*predicateMetadata); ok {
-		epsMeta = predicateMeta.evenPodsSpreadMetadata
-	} else { // We don't have precomputed metadata. We have to follow a slow path to check spread constraints.
+	predicateMeta, ok := meta.(*predicateMetadata)
+	if !ok {
+		// We don't have precomputed metadata. We have to follow a slow path to check spread constraints.
 		// TODO(autoscaler): get it implemented
 		return false, nil, errors.New("metadata not pre-computed for EvenPodsSpreadPredicate")
 	}
+	epsMeta := predicateMeta.evenPodsSpreadMetadataSoft
+	retried := false
 
-	if epsMeta == nil || len(epsMeta.tpPairToMatchNum) == 0 || len(epsMeta.constraints) == 0 {
+RETRY:
+	if len(epsMeta.tpPairToMatchNum) == 0 || len(epsMeta.constraints) == 0 {
 		return true, nil, nil
 	}
 
@@ -1682,6 +1684,11 @@ func EvenPodsSpreadPredicate(pod *v1.Pod, meta Metadata, nodeInfo *schedulernode
 		matchNum := epsMeta.tpPairToMatchNum[pair]
 		skew := matchNum + selfMatchNum - minMatchNum
 		if skew > c.maxSkew {
+			if !retried {
+				retried = true
+				epsMeta = predicateMeta.evenPodsSpreadMetadata
+				goto RETRY
+			}
 			klog.V(5).Infof("node '%s' failed spreadConstraint[%s]: matchNum(%d) + selfMatchNum(%d) - minMatchNum(%d) > maxSkew(%d)", node.Name, tpKey, matchNum, selfMatchNum, minMatchNum, c.maxSkew)
 			return false, []PredicateFailureReason{ErrTopologySpreadConstraintsNotMatch}, nil
 		}
